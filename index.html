@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="zh-HK">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>AR 互動牆（含相片 & 塗鴉）</title>
+  <style>
+    html,body{height:100%;margin:0;background:#000;overflow:hidden}
+    #topHint{
+      position: fixed; left:12px; right:12px; top:12px; z-index:30;
+      color:#fff;background:rgba(0,0,0,0.45);padding:10px;border-radius:8px;
+    }
+    #overlayUI {
+      position: fixed; left: 0; right: 0; bottom: 0; z-index: 30;
+      display:flex; gap:8px; padding:10px; align-items:center;
+      background: rgba(10,10,12,0.45); backdrop-filter: blur(6px);
+    }
+    #overlayUI input[type="text"]{
+      flex:1;padding:10px;border-radius:8px;border:1px solid #444;font-size:16px;
+      background: rgba(255,255,255,0.95);
+    }
+    #overlayUI button{padding:10px 12px;border-radius:8px;border:0;cursor:pointer}
+    .btn-primary{background:#4ade80}
+    .btn-ghost{background:#f3f4f6}
+
+    /* 留言牆 canvas overlay */
+    #wallCanvas {
+      position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+      width: 80%; height: 60%; z-index:5; background: rgba(0,0,0,0.5); border-radius:8px;
+    }
+
+    /* 畫板 full-screen */
+    #drawLayer {
+      position: fixed; inset:0; z-index: 60; display:none;
+      background: rgba(0,0,0,0.4);
+    }
+    #drawCanvas { touch-action: none; background: #fff; border-radius: 8px; display:block; margin: 40px auto; box-shadow:0 8px 30px rgba(0,0,0,0.5)}
+    #drawControls { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); z-index: 70; display:flex; gap:8px; }
+  </style>
+</head>
+<body>
+  <div id="topHint">👆 進入 AR 後輕觸地面放置留言牆。可上載相片或用塗鴉創作，會貼到牆上。</div>
+
+  <!-- 8th Wall Embed -->
+  <a data-8code="uvsek"></a>
+  <script src="//cdn.8thwall.com/web/share/embed8.js"></script>
+
+  <!-- UI -->
+  <div id="overlayUI">
+    <input id="textInput" type="text" placeholder="輸入留言 (最多 120 字)"/>
+    <button id="addText" class="btn-primary">加到牆</button>
+    <button id="uploadPhoto" class="btn-ghost">上載相片</button>
+    <button id="openDraw" class="btn-ghost">塗鴉</button>
+    <button id="clearWall" class="btn-ghost">清牆</button>
+  </div>
+
+  <!-- 留言牆 Canvas -->
+  <canvas id="wallCanvas" width="1024" height="1024"></canvas>
+
+  <!-- 隱藏 file input -->
+  <input id="fileInput" type="file" accept="image/*" style="display:none" capture="environment">
+
+  <!-- Draw layer -->
+  <div id="drawLayer">
+    <canvas id="drawCanvas" width="800" height="600"></canvas>
+    <div id="drawControls">
+      <button id="drawClear" class="btn-ghost">清畫</button>
+      <button id="drawUndo" class="btn-ghost">復原</button>
+      <button id="drawSave" class="btn-primary">儲存並貼到牆</button>
+      <button id="drawClose" class="btn-ghost">取消</button>
+    </div>
+  </div>
+
+  <script type="module">
+    // ---------- 留言牆 / Canvas 功能 ----------
+    const wallCanvas = document.getElementById('wallCanvas');
+    const wctx = wallCanvas.getContext('2d');
+    const messages = [];
+    const images = [];
+
+    function wrapText(ctx, text, x, y, maxWidth, lineHeight){
+      const words = text.split(' ');
+      let line = '', curY = y;
+      for (let n=0;n<words.length;n++){
+        const testLine = line + words[n] + ' ';
+        const metrics = ctx.measureText(testLine);
+        if (metrics.width > maxWidth && n > 0){
+          ctx.fillText(line, x, curY);
+          line = words[n] + ' ';
+          curY += lineHeight;
+        } else {
+          line = testLine;
+        }
+      }
+      ctx.fillText(line, x, curY);
+    }
+
+    function renderWall(){
+      wctx.clearRect(0,0,wallCanvas.width, wallCanvas.height);
+      wctx.fillStyle = 'rgba(18,18,20,0.7)';
+      wctx.fillRect(0,0,wallCanvas.width, wallCanvas.height);
+      wctx.fillStyle = '#fff';
+      wctx.font = 'bold 44px system-ui';
+      wctx.fillText('AR 留言牆', 40, 80);
+
+      const pad = 24;
+      const imgAreaW = 420;
+      let imgY = 120;
+      for (let i = 0; i < images.length; i++) {
+        const it = images[i];
+        const scale = Math.min(imgAreaW / it.w, 160 / it.h, 1);
+        const dw = it.w * scale;
+        const dh = it.h * scale;
+        wctx.drawImage(it.img, pad, imgY, dw, dh);
+        imgY += dh + 12;
+        if (imgY > wallCanvas.height - 200) break;
+      }
+
+      const textX = imgAreaW + pad*2;
+      let y = wallCanvas.height - 40;
+      const lineH = 40;
+      wctx.textAlign = 'left';
+      wctx.fillStyle = 'rgba(255,255,255,0.95)';
+      wctx.font = '600 32px system-ui';
+      for (let i = messages.length - 1; i >= 0; i--) {
+        const text = '• ' + messages[i];
+        y -= lineH;
+        wrapText(wctx, text, textX, y, wallCanvas.width - textX - pad, 34);
+        if (y < 120) break;
+      }
+    }
+
+    renderWall();
+
+    // UI interactions
+    const textInput = document.getElementById('textInput');
+    document.getElementById('addText').addEventListener('click', ()=>{
+      const v = (textInput.value||'').trim();
+      if (!v) return;
+      messages.push(v.slice(0,120));
+      if (messages.length > 30) messages.shift();
+      renderWall();
+      textInput.value='';
+    });
+
+    const fileInput = document.getElementById('fileInput');
+    document.getElementById('uploadPhoto').addEventListener('click', ()=> fileInput.click());
+    fileInput.addEventListener('change', async (e)=>{
+      const f = e.target.files && e.target.files[0]; if (!f) return;
+      const img = await loadImageFromFile(f);
+      images.push({ img, w: img.width, h: img.height });
+      if (images.length>8) images.shift();
+      renderWall();
+      fileInput.value='';
+    });
+    function loadImageFromFile(file){
+      return new Promise((res,rej)=>{
+        const fr = new FileReader();
+        fr.onload = ()=> {
+          const img = new Image();
+          img.onload = ()=> res(img);
+          img.onerror = rej;
+          img.src = fr.result;
+        };
+        fr.readAsDataURL(file);
+      });
+    }
+
+    document.getElementById('clearWall').addEventListener('click', ()=>{
+      messages.length = 0; images.length=0; renderWall();
+    });
+
+    // ---------- Draw Canvas ----------
+    const drawLayer = document.getElementById('drawLayer');
+    const drawCanvas = document.getElementById('drawCanvas');
+    const dctx = drawCanvas.getContext('2d');
+    let drawing=false,lastX=0,lastY=0;
+    const strokes=[];
+    const maxUndo=20;
+
+    function resizeDrawCanvas(){
+      const w = Math.min(window.innerWidth - 48, 1000);
+      const h = Math.min(window.innerHeight - 180, 800);
+      drawCanvas.width=w; drawCanvas.height=h;
+      dctx.fillStyle='#fff'; dctx.fillRect(0,0,w,h);
+    }
+    window.addEventListener('resize', resizeDrawCanvas);
+    resizeDrawCanvas();
+
+    function pushState(){ if(strokes.length>=maxUndo) strokes.shift(); strokes.push(dctx.getImageData(0,0,drawCanvas.width,drawCanvas.height)); }
+    function undo(){ if(!strokes.length) return; const im=strokes.pop(); dctx.putImageData(im,0,0); }
+
+    function startDraw(x,y){ drawing=true; lastX=x; lastY=y; pushState(); }
+    function drawTo(x,y){ if(!drawing) return; dctx.lineJoin='round'; dctx.lineCap='round'; dctx.strokeStyle='#000'; dctx.lineWidth=Math.max(4, drawCanvas.width/150); dctx.beginPath(); dctx.moveTo(lastX,lastY); dctx.lineTo(x,y); dctx.stroke(); lastX=x; lastY=y;}
+    function endDraw(){drawing=false;}
+
+    drawCanvas.addEventListener('pointerdown',e=>{drawCanvas.setPointerCapture(e.pointerId); const rect=drawCanvas.getBoundingClientRect(); startDraw(e.clientX-rect.left,e.clientY-rect.top);});
+    drawCanvas.addEventListener('pointermove',e=>{ if(!drawing)return; const rect=drawCanvas.getBoundingClientRect(); drawTo(e.clientX-rect.left,e.clientY-rect.top); });
+    drawCanvas.addEventListener('pointerup',e=>{ drawCanvas.releasePointerCapture(e.pointerId); endDraw(); });
+    drawCanvas.addEventListener('pointerleave',()=>endDraw());
+
+    document.getElementById('openDraw').addEventListener('click',()=>{ drawLayer.style.display='block'; resizeDrawCanvas(); });
+    document.getElementById('drawClose').addEventListener('click',()=>{ drawLayer.style.display='none'; });
+    document.getElementById('drawClear').addEventListener('click',()=>{ dctx.fillStyle='#fff'; dctx.fillRect(0,0,drawCanvas.width,drawCanvas.height); strokes.length=0; });
+    document.getElementById('drawUndo').addEventListener('click',()=>undo());
+    document.getElementById('drawSave').addEventListener('click',()=>{
+      const dataURL = drawCanvas.toDataURL('image/png');
+      const img = new Image();
+      img.onload = ()=>{ images.push({img, w:img.width, h:img.height}); if(images.length>8) images.shift(); renderWall(); };
+      img.src = dataURL;
+      drawLayer.style.display='none';
+    });
+  </script>
+</body>
+</html>
